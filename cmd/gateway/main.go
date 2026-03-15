@@ -2,16 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
-	"crypto/rand"
-	"encoding/hex"
-
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 type Tenant struct {
@@ -40,6 +41,18 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+		DB:   0,
+	})
+
+	pong, err := rdb.Ping(ctx).Result()
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Redis connected:", pong)
 
 	dbpool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -199,6 +212,36 @@ func main() {
 			"tenant_id": tenant_id,
 		})
 
+		redisKey := "ratelimit:" + apiKey
+
+		count, err := rdb.Incr(ctx, redisKey).Result()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "failed to update rate limit counter",
+			})
+			return
+		}
+
+		if count == 1 {
+			err = rdb.Expire(ctx, redisKey, 60*time.Second).Err()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "failed to set rate limit expiry",
+				})
+				return
+			}
+		}
+
+		if count > 5 {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": "rate limit exceeded",
+			})
+			return
+		}
+
+		c.JSON(http.StatusCreated, gin.H{
+			"count": count,
+		})
 	})
 
 	if err := router.Run(":8080"); err != nil {
