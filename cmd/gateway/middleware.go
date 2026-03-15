@@ -72,6 +72,7 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 
 		apiKey := apiKeyValue.(string)
 		redisKey := "ratelimit:" + apiKey
+		violationKey := "violations:" + apiKey
 
 		count, err := rdb.Incr(c.Request.Context(), redisKey).Result()
 		if err != nil {
@@ -94,8 +95,43 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 		}
 
 		if count > 5 {
+			violationCount, err := rdb.Incr(c.Request.Context(), violationKey).Result()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "failed to update violation counter",
+				})
+				c.Abort()
+				return
+			}
+
+			if violationCount == 1 {
+				err = rdb.Expire(c.Request.Context(), violationKey, 5*time.Minute).Err()
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"error": "failed to set violation expiry",
+					})
+					c.Abort()
+					return
+				}
+			}
+
+			if violationCount >= 3 {
+				blockKey := "blocked:" + apiKey
+
+				err = rdb.Set(c.Request.Context(), blockKey, "1", 10*time.Minute).Err()
+
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"error": "failed to block api key",
+					})
+					c.Abort()
+					return
+				}
+			}
+
 			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error": "rate limit exceeded",
+				"error":           "rate limit exceeded",
+				"violation_count": violationCount,
 			})
 			c.Abort()
 			return
@@ -105,4 +141,41 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func BlockCheckMiddleware(rdb *redis.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKeyValue, exists := c.Get("api_key")
+		if !exists {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "api key missing from context",
+			})
+			c.Abort()
+			return
+		}
+
+		apiKey := apiKeyValue.(string)
+		blockKey := "blocked:" + apiKey
+
+		_, err := rdb.Get(c.Request.Context(), blockKey).Result()
+
+		if err == redis.Nil {
+			c.Next()
+			return
+		}
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "failed to check block status",
+			})
+			c.Abort()
+			return
+		}
+
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "api key temporarily blocked",
+		})
+		c.Abort()
+	}
+
 }

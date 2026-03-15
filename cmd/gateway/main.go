@@ -175,6 +175,7 @@ func main() {
 	router.GET(
 		"/protected",
 		APIKeyAuthMiddleware(dbpool),
+		BlockCheckMiddleware(rdb),
 		RateLimitMiddleware(rdb),
 		func(c *gin.Context) {
 			tenantID, _ := c.Get("tenant_id")
