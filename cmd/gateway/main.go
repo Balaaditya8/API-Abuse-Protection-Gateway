@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -177,17 +178,7 @@ func main() {
 		APIKeyAuthMiddleware(dbpool),
 		BlockCheckMiddleware(rdb),
 		RateLimitMiddleware(rdb),
-		func(c *gin.Context) {
-			tenantID, _ := c.Get("tenant_id")
-			count, _ := c.Get("rate_count")
-			allowed, _ := c.Get("rate_limit_count")
-			c.JSON(http.StatusOK, gin.H{
-				"message":   "allowed",
-				"tenant_id": tenantID,
-				"count":     count,
-				"allowed":   allowed,
-			})
-		},
+		forwardHelloHandler,
 	)
 
 	if err := router.Run(":8080"); err != nil {
@@ -204,4 +195,25 @@ func generateAPIKey() (string, error) {
 	}
 
 	return "rk_" + hex.EncodeToString(bytes), nil
+}
+
+func forwardHelloHandler(c *gin.Context) {
+	resp, err := http.Get("http://localhost:8081/hello")
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": "failed to reach backend",
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "failed to read backend response",
+		})
+		return
+	}
+
+	c.Data(resp.StatusCode, "application/json", body)
 }
