@@ -180,11 +180,12 @@ func main() {
 		func(c *gin.Context) {
 			tenantID, _ := c.Get("tenant_id")
 			count, _ := c.Get("rate_count")
-
+			allowed, _ := c.Get("rate_limit_count")
 			c.JSON(http.StatusOK, gin.H{
 				"message":   "allowed",
 				"tenant_id": tenantID,
 				"count":     count,
+				"allowed":   allowed,
 			})
 		},
 	)

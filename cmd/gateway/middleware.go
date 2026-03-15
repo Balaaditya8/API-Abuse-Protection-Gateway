@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -22,19 +23,22 @@ func APIKeyAuthMiddleware(dbpool *pgxpool.Pool) gin.HandlerFunc {
 		}
 
 		query := `
-		SELECT tenant_id, active
-		FROM api_keys
-		WHERE key = $1
+			SELECT t.id, k.active, t.rate_limit_count, t.rate_limit_window_sec
+			FROM api_keys k
+			JOIN tenants t ON k.tenant_id = t.id
+			WHERE k.key = $1
 		`
 
 		var tenantID int64
 		var active bool
+		var rateLimitCount int64
+		var rateLimitWindow int64
 
 		err := dbpool.QueryRow(
 			c.Request.Context(),
 			query,
 			apiKey,
-		).Scan(&tenantID, &active)
+		).Scan(&tenantID, &active, &rateLimitCount, &rateLimitWindow)
 
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -54,7 +58,11 @@ func APIKeyAuthMiddleware(dbpool *pgxpool.Pool) gin.HandlerFunc {
 
 		c.Set("api_key", apiKey)
 		c.Set("tenant_id", tenantID)
-
+		c.Set("rate_limit_count", rateLimitCount)
+		c.Set("rate_limit_window", rateLimitWindow)
+		fmt.Println("tenantID:", tenantID)
+		fmt.Println("rateLimitCount:", rateLimitCount)
+		fmt.Println("rateLimitWindow:", rateLimitWindow)
 		c.Next()
 	}
 }
@@ -62,6 +70,8 @@ func APIKeyAuthMiddleware(dbpool *pgxpool.Pool) gin.HandlerFunc {
 func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKeyValue, exists := c.Get("api_key")
+		limitValue, exists := c.Get("rate_limit_count")
+		windowValue, exists := c.Get("rate_limit_window")
 		if !exists {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": "api key missing from context",
@@ -71,6 +81,8 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 		}
 
 		apiKey := apiKeyValue.(string)
+		limit := limitValue.(int64)
+		window := windowValue.(int64)
 		redisKey := "ratelimit:" + apiKey
 		violationKey := "violations:" + apiKey
 
@@ -84,7 +96,7 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 		}
 
 		if count == 1 {
-			err = rdb.Expire(c.Request.Context(), redisKey, 60*time.Second).Err()
+			err = rdb.Expire(c.Request.Context(), redisKey, time.Duration(window)*time.Second).Err()
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"error": "failed to set rate limit expiry",
@@ -94,7 +106,7 @@ func RateLimitMiddleware(rdb *redis.Client) gin.HandlerFunc {
 			}
 		}
 
-		if count > 5 {
+		if count > limit {
 			violationCount, err := rdb.Incr(c.Request.Context(), violationKey).Result()
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{
