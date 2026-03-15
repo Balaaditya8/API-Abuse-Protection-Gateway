@@ -172,77 +172,21 @@ func main() {
 
 	})
 
-	router.GET("/protected", func(c *gin.Context) {
+	router.GET(
+		"/protected",
+		APIKeyAuthMiddleware(dbpool),
+		RateLimitMiddleware(rdb),
+		func(c *gin.Context) {
+			tenantID, _ := c.Get("tenant_id")
+			count, _ := c.Get("rate_count")
 
-		apiKey := c.GetHeader("x-api-key")
-		if apiKey == "" {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Empty api key",
+			c.JSON(http.StatusOK, gin.H{
+				"message":   "allowed",
+				"tenant_id": tenantID,
+				"count":     count,
 			})
-			return
-		}
-
-		query := `
-		SELECT tenant_id, active from api_keys where key=$1
-		`
-
-		var tenant_id int64
-		var active bool
-
-		err := dbpool.QueryRow(ctx, query, apiKey).Scan(
-			&tenant_id,
-			&active,
-		)
-
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Api Key Not Found",
-			})
-			return
-		}
-
-		if !active {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": "api key inactive",
-			})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"message":   "valid api key",
-			"tenant_id": tenant_id,
-		})
-
-		redisKey := "ratelimit:" + apiKey
-
-		count, err := rdb.Incr(ctx, redisKey).Result()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "failed to update rate limit counter",
-			})
-			return
-		}
-
-		if count == 1 {
-			err = rdb.Expire(ctx, redisKey, 60*time.Second).Err()
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error": "failed to set rate limit expiry",
-				})
-				return
-			}
-		}
-
-		if count > 5 {
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error": "rate limit exceeded",
-			})
-			return
-		}
-
-		c.JSON(http.StatusCreated, gin.H{
-			"count": count,
-		})
-	})
+		},
+	)
 
 	if err := router.Run(":8080"); err != nil {
 		panic(err)
