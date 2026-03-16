@@ -103,12 +103,6 @@ func main() {
 		c.JSON(http.StatusCreated, tenant)
 	})
 
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "Server is Running",
-		})
-	})
-
 	router.POST("/tenants/:id/keys", func(c *gin.Context) {
 		tenantIdStr := c.Param("id")
 		tenantId, err := strconv.ParseInt(tenantIdStr, 10, 64)
@@ -173,17 +167,15 @@ func main() {
 
 	})
 
-	router.GET(
-		"/protected",
-		APIKeyAuthMiddleware(dbpool),
+	router.Any("/api/*proxyPath", APIKeyAuthMiddleware(dbpool),
 		BlockCheckMiddleware(rdb),
 		RateLimitMiddleware(rdb),
-		forwardHelloHandler,
-	)
+		ForwardHandler("http://localhost:8081"))
 
 	if err := router.Run(":8080"); err != nil {
 		panic(err)
 	}
+
 }
 
 func generateAPIKey() (string, error) {
@@ -216,4 +208,59 @@ func forwardHelloHandler(c *gin.Context) {
 	}
 
 	c.Data(resp.StatusCode, "application/json", body)
+}
+
+func ForwardHandler(backendBaseURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		targetURL := backendBaseURL + c.Param("proxyPath")
+		if c.Request.URL.RawQuery != "" {
+			targetURL += "?" + c.Request.URL.RawQuery
+		}
+
+		req, err := http.NewRequest(
+			c.Request.Method,
+			targetURL,
+			c.Request.Body,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "failed to create backend request",
+			})
+			return
+		}
+
+		// copy headers from original request
+		for key, values := range c.Request.Header {
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": "failed to reach backend service",
+			})
+			return
+		}
+		defer resp.Body.Close()
+
+		// copy backend response headers
+		for key, values := range resp.Header {
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "failed to read backend response",
+			})
+			return
+		}
+
+		c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
+	}
 }
