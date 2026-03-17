@@ -10,7 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func APIKeyAuthMiddleware(dbpool *pgxpool.Pool) gin.HandlerFunc {
+func APIKeyAuthMiddleware(dbpool *pgxpool.Pool, rdb *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 
 		apiKey := c.GetHeader("x-api-key")
@@ -21,7 +21,8 @@ func APIKeyAuthMiddleware(dbpool *pgxpool.Pool) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-
+		ip := c.ClientIP()
+		invalidKey := "invalidkey:" + ip
 		query := `
 			SELECT t.id, k.active, t.rate_limit_count, t.rate_limit_window_sec
 			FROM api_keys k
@@ -41,6 +42,32 @@ func APIKeyAuthMiddleware(dbpool *pgxpool.Pool) gin.HandlerFunc {
 		).Scan(&tenantID, &active, &rateLimitCount, &rateLimitWindow)
 
 		if err != nil {
+			invalidCount, _ := rdb.Incr(c.Request.Context(), invalidKey).Result()
+
+			if invalidCount == 1 {
+				err = rdb.Expire(c.Request.Context(), invalidKey, 5*time.Minute).Err()
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"error": "failed to set invalid limit expiry",
+					})
+					c.Abort()
+					return
+				}
+			}
+
+			if invalidCount > 10 {
+				blockedIP := "blockedIP:" + ip
+				err = rdb.Set(c.Request.Context(), blockedIP, "1", 10*time.Minute).Err()
+
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"error": "failed to block ip",
+					})
+					c.Abort()
+					return
+				}
+			}
+
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error": "invalid api key",
 			})
@@ -190,4 +217,31 @@ func BlockCheckMiddleware(rdb *redis.Client) gin.HandlerFunc {
 		c.Abort()
 	}
 
+}
+
+func IPBlockerMiddleware(rdb *redis.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		blockedIP := "blockedIP:" + ip
+		_, err := rdb.Get(c.Request.Context(), blockedIP).Result()
+
+		if err == redis.Nil {
+			c.Next()
+			return
+		}
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "failed to check block status",
+			})
+			c.Abort()
+			return
+		}
+
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "IPtemporarily blocked",
+		})
+		c.Abort()
+
+	}
 }

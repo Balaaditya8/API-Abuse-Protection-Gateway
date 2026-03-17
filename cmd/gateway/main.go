@@ -167,7 +167,9 @@ func main() {
 
 	})
 
-	router.Any("/api/*proxyPath", APIKeyAuthMiddleware(dbpool),
+	router.Any("/api/*proxyPath",
+		IPBlockerMiddleware(rdb),
+		APIKeyAuthMiddleware(dbpool, rdb),
 		BlockCheckMiddleware(rdb),
 		RateLimitMiddleware(rdb),
 		ForwardHandler("http://localhost:8081"))
